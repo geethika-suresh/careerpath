@@ -31,10 +31,13 @@ export default function App() {
   useEffect(() => {
     checkDbStatus();
 
-    // Check if a student was previously saved in this browser session
-    const savedStudentId = localStorage.getItem('careerpath_active_student_id');
-    if (savedStudentId) {
-      loadStudentProfile(savedStudentId);
+    // Check if a student token or ID was previously saved in this browser
+    const savedToken =
+      localStorage.getItem('careerpath_token') ||
+      localStorage.getItem('careerpath_active_student_id');
+
+    if (savedToken) {
+      loadStudentProfile(savedToken);
     }
   }, []);
 
@@ -59,9 +62,15 @@ export default function App() {
     }
   };
 
-  const loadStudentProfile = async (studentId: string) => {
+  const loadStudentProfile = async (studentIdOrToken: string) => {
     try {
-      const res = await fetch(`/api/students/${studentId}`);
+      const res = await fetch(`/api/students/${studentIdOrToken}`, {
+        headers: {
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${studentIdOrToken}`,
+          'x-access-token': studentIdOrToken
+        }
+      });
       const data = await res.json();
       if (data.success && data.student) {
         setStudent(data.student);
@@ -96,37 +105,102 @@ export default function App() {
     const targetCareer = newStudent.selectedCareer || 'frontend-developer';
     setSelectedCareerId(targetCareer);
 
-    // Save ID for session restoration
-    const id = newStudent._id || newStudent.id;
-    if (id) {
-      localStorage.setItem('careerpath_active_student_id', id);
+    // Save token and ID for session restoration
+    const token = newStudent.token || newStudent._id || newStudent.id;
+    if (token) {
+      try {
+        localStorage.setItem('careerpath_token', token);
+        localStorage.setItem('careerpath_active_student_id', token);
+      } catch (_) {}
     }
 
     // Fetch and populate recommendations
     fetchRecommendations(newStudent.currentSkills || [], newStudent.interests || []);
 
-    showToast('Assessment saved to MongoDB! Exploring your tailored recommendations.', 'success');
+    showToast('Assessment saved! Your personalized career map & recommendations are ready.', 'success');
     setCurrentView('recommendations');
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleGenerateRoadmap = async (careerId: string) => {
+    const targetCareer = careerId || selectedCareerId;
+    setSelectedCareerId(targetCareer);
+
+    try {
+      const idOrToken = student?.token || student?._id || student?.id;
+      const res = await fetch('/api/roadmap/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(student?.token ? { 'Authorization': `Bearer ${student.token}` } : {})
+        },
+        body: JSON.stringify({
+          careerId: targetCareer,
+          studentId: idOrToken,
+          token: student?.token,
+          currentSkills: student?.currentSkills || []
+        })
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        if (data.student) {
+          setStudent(data.student);
+        } else if (data.personalizedRoadmap) {
+          setStudent((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  selectedCareer: targetCareer,
+                  roadmapProgress: data.personalizedRoadmap
+                }
+              : null
+          );
+        }
+        const matchedCareer = CAREERS_DATA.find((c) => c.id === targetCareer);
+        showToast(`Generated personalized Career Map for ${matchedCareer?.name || targetCareer}!`, 'success');
+      }
+    } catch (err) {
+      console.error('Error generating roadmap:', err);
+      showToast('Could not sync career map.', 'error');
+    }
   };
 
   const handleSelectCareer = async (careerId: string) => {
     setSelectedCareerId(careerId);
 
     if (student) {
-      const studentId = student._id || student.id;
+      const studentId = student.token || student._id || student.id;
       try {
-        const res = await fetch(`/api/students/${studentId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ selectedCareer: careerId })
+        const res = await fetch('/api/roadmap/generate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(student.token ? { 'Authorization': `Bearer ${student.token}` } : {})
+          },
+          body: JSON.stringify({
+            careerId,
+            studentId,
+            token: student.token,
+            currentSkills: student.currentSkills || []
+          })
         });
         const data = await res.json();
         if (data.success && data.student) {
           setStudent(data.student);
+        } else if (data.success && data.personalizedRoadmap) {
+          setStudent((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  selectedCareer: careerId,
+                  roadmapProgress: data.personalizedRoadmap
+                }
+              : null
+          );
         }
       } catch (err) {
-        console.error('Error updating target career:', err);
+        console.error('Error updating target career roadmap:', err);
       }
     }
 
@@ -135,14 +209,26 @@ export default function App() {
   };
 
   const handleUpdateStepStatus = async (stepNumber: number, skill: string, newStatus: SkillStatus) => {
-    if (!student) return;
+    if (!student) {
+      showToast(`Milestone "${skill}" set to ${newStatus.replace('_', ' ')}. Complete assessment to persist!`, 'info');
+      return;
+    }
 
-    const studentId = student._id || student.id;
+    const studentId = student.token || student._id || student.id;
     try {
       const res = await fetch(`/api/roadmap/${studentId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stepNumber, skill, status: newStatus })
+        headers: {
+          'Content-Type': 'application/json',
+          ...(student.token ? { 'Authorization': `Bearer ${student.token}` } : {})
+        },
+        body: JSON.stringify({
+          stepNumber,
+          skill,
+          status: newStatus,
+          careerId: selectedCareerId,
+          token: student.token
+        })
       });
 
       const data = await res.json();
@@ -252,6 +338,7 @@ export default function App() {
             onUpdateStepStatus={handleUpdateStepStatus}
             setCurrentView={setCurrentView}
             onSelectCareer={handleSelectCareer}
+            onGenerateRoadmap={handleGenerateRoadmap}
           />
         )}
 

@@ -25,6 +25,7 @@ interface CareerRoadmapProps {
   onUpdateStepStatus: (stepNumber: number, skill: string, newStatus: SkillStatus) => Promise<void>;
   setCurrentView: (view: AppView) => void;
   onSelectCareer: (careerId: string) => void;
+  onGenerateRoadmap?: (careerId: string) => Promise<void>;
 }
 
 export const CareerRoadmap: React.FC<CareerRoadmapProps> = ({
@@ -32,30 +33,50 @@ export const CareerRoadmap: React.FC<CareerRoadmapProps> = ({
   student,
   onUpdateStepStatus,
   setCurrentView,
-  onSelectCareer
+  onSelectCareer,
+  onGenerateRoadmap
 }) => {
   const [updatingStep, setUpdatingStep] = useState<number | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [activeTab, setActiveTab] = useState<'roadmap' | 'projects'>('roadmap');
 
   const career: Career = CAREERS_DATA.find((c) => c.id === careerId) || CAREERS_DATA[0];
 
-  // Merge career static steps with student personalized roadmap progress
-  const progressMap = new Map<number, RoadmapProgressItem>();
-  if (student?.roadmapProgress) {
-    student.roadmapProgress.forEach((p) => progressMap.set(p.stepNumber, p));
+  const normalizeSkill = (str: string) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  // Index student's saved roadmap progress by careerId+stepNumber AND by normalized skill name
+  const stepMap = new Map<number, RoadmapProgressItem>();
+  const skillMap = new Map<string, RoadmapProgressItem>();
+
+  if (student?.roadmapProgress && student.roadmapProgress.length > 0) {
+    student.roadmapProgress.forEach((p) => {
+      if (p.careerId === career.id) {
+        stepMap.set(p.stepNumber, p);
+      }
+      if (p.skill) {
+        skillMap.set(normalizeSkill(p.skill), p);
+      }
+    });
   }
 
   const stepsWithStatus = career.roadmap.map((step) => {
-    const saved = progressMap.get(step.stepNumber);
+    // 1. Direct step match for current career
+    let saved = stepMap.get(step.stepNumber);
+
+    // 2. Normalized skill name match across saved progress
+    if (!saved) {
+      saved = skillMap.get(normalizeSkill(step.skill));
+    }
+
     let status: SkillStatus = saved?.status || 'not_started';
 
-    // If no explicit record yet, check if student already has this skill
-    if (!saved) {
-      const hasSkill = student?.currentSkills?.some(
-        (s) =>
-          s.toLowerCase().trim() === step.skill.toLowerCase().trim() ||
-          step.skill.toLowerCase().includes(s.toLowerCase().trim())
-      );
+    // 3. Fallback: check if student has this skill in their assessed skill set
+    if (!saved && student?.currentSkills) {
+      const hasSkill = student.currentSkills.some((s) => {
+        const normS = normalizeSkill(s);
+        const normStep = normalizeSkill(step.skill);
+        return normS === normStep || normStep.includes(normS);
+      });
       if (hasSkill) status = 'completed';
     }
 
@@ -81,25 +102,57 @@ export const CareerRoadmap: React.FC<CareerRoadmapProps> = ({
     }
   };
 
+  const handleGenerateClick = async () => {
+    setIsSyncing(true);
+    try {
+      if (onGenerateRoadmap) {
+        await onGenerateRoadmap(career.id);
+      }
+    } catch (err) {
+      console.error('Error syncing roadmap:', err);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-8">
+      {/* Guest Mode Notice */}
+      {!student && (
+        <div className="p-4 rounded-2xl bg-blue-50 border border-blue-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-blue-900">
+          <div className="flex items-center gap-2 text-xs">
+            <Sparkles className="w-4 h-4 text-blue-600 shrink-0" />
+            <span>
+              <strong>Previewing Roadmap:</strong> Take the 2-minute skill assessment to personalize milestones with your current skills and persist progress to MongoDB!
+            </span>
+          </div>
+          <button
+            id="roadmap-take-assessment-banner-btn"
+            onClick={() => setCurrentView('assessment')}
+            className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shrink-0 transition-colors"
+          >
+            Start Assessment
+          </button>
+        </div>
+      )}
+
       {/* Top Header & Navigation */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-6">
         <div>
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-100 text-blue-800 text-xs font-semibold mb-2">
             <Map className="w-3.5 h-3.5" />
-            <span>Feature 4: Personalized Career Roadmap</span>
+            <span>Interactive Career Map &amp; Roadmap</span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
-            {career.name} Learning Roadmap
+            {career.name} Career Map
           </h1>
           <p className="text-xs sm:text-sm text-slate-600 mt-1">
-            Personalized learning sequence for {student?.name || 'you'}, organized from foundational skills to portfolio capstones.
+            Step-by-step verified learning sequence for {student?.name || 'you'}, organized from foundational skills to production portfolio capstones.
           </p>
         </div>
 
         {/* Action button & Career Selector */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <select
             id="roadmap-career-select"
             value={career.id}
@@ -112,6 +165,19 @@ export const CareerRoadmap: React.FC<CareerRoadmapProps> = ({
               </option>
             ))}
           </select>
+
+          {onGenerateRoadmap && (
+            <button
+              id="roadmap-sync-btn"
+              onClick={handleGenerateClick}
+              disabled={isSyncing}
+              className="px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+              title="Re-generate and sync roadmap for this career"
+            >
+              <RotateCcw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-blue-600' : ''}`} />
+              <span>{isSyncing ? 'Generating...' : 'Sync Career Map'}</span>
+            </button>
+          )}
 
           <button
             id="roadmap-view-dashboard-btn"

@@ -3,6 +3,7 @@ export type SkillStatus = 'completed' | 'in_progress' | 'not_started';
 export interface StudentProfile {
   _id?: string;
   id?: string;
+  token?: string;
   name: string;
   degree: string;
   branch: string;
@@ -76,6 +77,7 @@ export interface SkillGapAnalysisData {
 export interface RoadmapProgressItem {
   stepNumber: number;
   skill: string;
+  careerId?: string;
   status: SkillStatus;
   notes?: string;
   updatedAt?: string;

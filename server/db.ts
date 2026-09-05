@@ -64,10 +64,13 @@ export function getDatabaseStatus() {
 
 // Unified student repository helpers
 export async function createStudent(profileData: Partial<StudentProfile>): Promise<StudentProfile> {
+  const token = profileData.token || `token_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+
   if (isConnectedToMongo) {
     try {
       const doc = new StudentModel({
         ...profileData,
+        token,
         createdAt: new Date(),
         updatedAt: new Date()
       });
@@ -83,6 +86,7 @@ export async function createStudent(profileData: Partial<StudentProfile>): Promi
   const newProfile: StudentProfile = {
     _id: id,
     id,
+    token,
     name: profileData.name || 'Anonymous Student',
     degree: profileData.degree || 'B.Tech',
     branch: profileData.branch || 'Computer Science Engineering',
@@ -100,38 +104,56 @@ export async function createStudent(profileData: Partial<StudentProfile>): Promi
   };
 
   memoryStudents.set(id, newProfile);
+  if (token) {
+    memoryStudents.set(token, newProfile);
+  }
   return newProfile;
 }
 
-export async function getStudentById(id: string): Promise<StudentProfile | null> {
-  if (isConnectedToMongo && mongoose.Types.ObjectId.isValid(id)) {
+export async function getStudentById(idOrToken: string): Promise<StudentProfile | null> {
+  if (!idOrToken) return null;
+
+  if (isConnectedToMongo) {
     try {
-      const doc = await StudentModel.findById(id).lean();
-      if (doc) return formatStudentDoc(doc);
+      if (mongoose.Types.ObjectId.isValid(idOrToken)) {
+        const doc = await StudentModel.findById(idOrToken).lean();
+        if (doc) return formatStudentDoc(doc);
+      }
+      const tokenDoc = await StudentModel.findOne({
+        $or: [{ token: idOrToken }, { _id: mongoose.Types.ObjectId.isValid(idOrToken) ? idOrToken : undefined }]
+      }).lean();
+      if (tokenDoc) return formatStudentDoc(tokenDoc);
     } catch (err: any) {
-      console.warn('Mongo findById error, checking memory store:', err.message);
+      console.warn('Mongo find error, checking memory store:', err.message);
     }
   }
 
-  if (memoryStudents.has(id)) {
-    return memoryStudents.get(id) || null;
+  if (memoryStudents.has(idOrToken)) {
+    return memoryStudents.get(idOrToken) || null;
   }
 
-  // If queried by any ID and only 1 student exists in memory, return latest
+  // Check matching by token, _id, or id
   if (memoryStudents.size > 0) {
     const list = Array.from(memoryStudents.values());
-    const matched = list.find(s => s._id === id || s.id === id);
+    const matched = list.find(s => s._id === idOrToken || s.id === idOrToken || s.token === idOrToken);
     if (matched) return matched;
   }
 
   return null;
 }
 
-export async function updateStudent(id: string, updates: Partial<StudentProfile>): Promise<StudentProfile | null> {
-  if (isConnectedToMongo && mongoose.Types.ObjectId.isValid(id)) {
+export async function updateStudent(idOrToken: string, updates: Partial<StudentProfile>): Promise<StudentProfile | null> {
+  if (!idOrToken) return null;
+
+  if (isConnectedToMongo) {
     try {
-      const updated = await StudentModel.findByIdAndUpdate(
-        id,
+      let query: any = { token: idOrToken };
+      if (mongoose.Types.ObjectId.isValid(idOrToken)) {
+        query = { $or: [{ _id: idOrToken }, { token: idOrToken }] };
+      }
+
+      const updated = await StudentModel.findOneAndUpdate(
+        query,
         { $set: { ...updates, updatedAt: new Date() } },
         { new: true, runValidators: true }
       ).lean();
@@ -141,14 +163,15 @@ export async function updateStudent(id: string, updates: Partial<StudentProfile>
     }
   }
 
-  const existing = memoryStudents.get(id) || Array.from(memoryStudents.values()).find(s => s._id === id || s.id === id);
+  const existing = memoryStudents.get(idOrToken) || Array.from(memoryStudents.values()).find(s => s._id === idOrToken || s.id === idOrToken || s.token === idOrToken);
   if (existing) {
     const updated: StudentProfile = {
       ...existing,
       ...updates,
       updatedAt: new Date().toISOString()
     };
-    memoryStudents.set(existing._id || id, updated);
+    memoryStudents.set(existing._id || existing.id || idOrToken, updated);
+    if (existing.token) memoryStudents.set(existing.token, updated);
     return updated;
   }
 
@@ -164,6 +187,7 @@ function formatStudentDoc(doc: any): StudentProfile {
   return {
     _id: obj._id?.toString() || obj.id,
     id: obj._id?.toString() || obj.id,
+    token: obj.token || obj._id?.toString() || obj.id,
     name: obj.name,
     degree: obj.degree,
     branch: obj.branch,

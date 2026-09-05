@@ -2,6 +2,7 @@ import mongoose, { Schema, Document, Model } from 'mongoose';
 import { SkillStatus, RoadmapProgressItem } from '../../src/types.ts';
 
 export interface IStudentDocument extends Document {
+  token?: string;
   name: string;
   degree: string;
   branch: string;
@@ -20,6 +21,7 @@ export interface IStudentDocument extends Document {
 
 const StudentSchema = new Schema<IStudentDocument>(
   {
+    token: { type: String, trim: true, index: true },
     name: { type: String, required: true, trim: true },
     degree: { type: String, required: true, trim: true },
     branch: { type: String, required: true, trim: true },
@@ -34,6 +36,7 @@ const StudentSchema = new Schema<IStudentDocument>(
       {
         stepNumber: Number,
         skill: String,
+        careerId: String,
         status: {
           type: String,
           enum: ['completed', 'in_progress', 'not_started'],

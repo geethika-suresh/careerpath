@@ -131,25 +131,37 @@ export function buildPersonalizedRoadmap(
   existingProgress: RoadmapProgressItem[] = []
 ): RoadmapProgressItem[] {
   const career = CAREERS_DATA.find((c) => c.id === careerId) || CAREERS_DATA[0];
-  const existingMap = new Map<number, RoadmapProgressItem>();
-  existingProgress.forEach((item) => existingMap.set(item.stepNumber, item));
+
+  // Match existing progress by normalized skill name so switching careers doesn't falsely overwrite steps
+  const existingSkillMap = new Map<string, RoadmapProgressItem>();
+  existingProgress.forEach((item) => {
+    if (item.skill) {
+      existingSkillMap.set(normalizeSkillName(item.skill), item);
+    }
+  });
 
   let firstUncompletedFound = false;
 
   return career.roadmap.map((step) => {
-    // If student already saved a status for this step, keep it
-    if (existingMap.has(step.stepNumber)) {
-      const saved = existingMap.get(step.stepNumber)!;
+    const normalized = normalizeSkillName(step.skill);
+
+    // If student already saved a status for this exact skill, keep it
+    if (existingSkillMap.has(normalized)) {
+      const saved = existingSkillMap.get(normalized)!;
+      if (saved.status === 'in_progress') {
+        firstUncompletedFound = true;
+      }
       return {
         stepNumber: step.stepNumber,
         skill: step.skill,
+        careerId: career.id,
         status: saved.status,
         notes: saved.notes,
         updatedAt: saved.updatedAt || new Date().toISOString()
       };
     }
 
-    // Default initialization based on student skills
+    // Default initialization based on student's verified skills
     const hasSkill = currentSkills.some((s) => skillsMatch(s, step.skill));
     let status: SkillStatus = 'not_started';
 
@@ -163,6 +175,7 @@ export function buildPersonalizedRoadmap(
     return {
       stepNumber: step.stepNumber,
       skill: step.skill,
+      careerId: career.id,
       status,
       updatedAt: new Date().toISOString()
     };
@@ -175,10 +188,14 @@ export function computeDashboardMetrics(student: StudentProfile, careerId?: stri
 
   const skillGap = calculateSkillGap(targetCareerId, student.currentSkills || [], student.skillStatuses || {});
 
-  // Roadmap metrics
-  const roadmapItems = student.roadmapProgress && student.roadmapProgress.length > 0
-    ? student.roadmapProgress
-    : buildPersonalizedRoadmap(targetCareerId, student.currentSkills || []);
+  // Roadmap metrics: filter for this career or rebuild for this career
+  const relevantRoadmap = (student.roadmapProgress || []).filter(
+    (item) => !item.careerId || item.careerId === targetCareerId
+  );
+
+  const roadmapItems = relevantRoadmap.length > 0
+    ? relevantRoadmap
+    : buildPersonalizedRoadmap(targetCareerId, student.currentSkills || [], student.roadmapProgress || []);
 
   const totalSteps = roadmapItems.length;
   const completedSteps = roadmapItems.filter((s) => s.status === 'completed').length;

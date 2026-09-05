@@ -134,34 +134,73 @@ export const AssessmentForm: React.FC<AssessmentFormProps> = ({
     setIsSubmitting(true);
 
     try {
+      // Resolve existing student token or identifier
+      const existingToken =
+        existingProfile?.token ||
+        (existingProfile ? (existingProfile._id || existingProfile.id) : null) ||
+        (typeof window !== 'undefined' ? localStorage.getItem('careerpath_token') : null) ||
+        undefined;
+
       const payload = {
+        token: existingToken,
         name: name.trim(),
         degree: degree.trim(),
         branch: branch.trim(),
         year: year.trim(),
         currentSkills: selectedSkills,
         interests: selectedInterests,
-        preferredDomain: preferredDomain.trim()
+        preferredDomain: preferredDomain.trim(),
+        selectedCareer: existingProfile?.selectedCareer || undefined
       };
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      };
+
+      if (existingToken) {
+        headers['Authorization'] = `Bearer ${existingToken}`;
+        headers['x-access-token'] = existingToken;
+      }
 
       const response = await fetch('/api/students', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(payload)
       });
 
-      const data = await response.json();
+      const responseText = await response.text();
+      let data: any;
+      try {
+        data = JSON.parse(responseText);
+      } catch (parseErr) {
+        console.error('Non-JSON server response received:', responseText);
+        throw new Error('Server returned an unexpected response format. Please try again.');
+      }
 
       if (!response.ok || !data.success) {
         throw new Error(data.error || 'Failed to save student profile.');
       }
 
-      setSuccessMessage('Your career recommendations are ready!');
+      const savedStudent: StudentProfile = {
+        ...data.student,
+        token: data.token || data.student?.token || existingToken,
+        roadmapProgress: data.roadmap || data.student?.roadmapProgress || []
+      };
 
-      // Smooth delay so the user sees the confirmation as instructed
+      if (data.token) {
+        try {
+          localStorage.setItem('careerpath_token', data.token);
+          localStorage.setItem('careerpath_active_student_id', data.student?._id || data.student?.id || data.token);
+        } catch (_) {}
+      }
+
+      setSuccessMessage('Profile saved! Personalized Career Roadmap & Recommendations generated.');
+
+      // Smooth transition so the user sees the confirmation
       setTimeout(() => {
-        onAssessmentComplete(data.student);
-      }, 1000);
+        onAssessmentComplete(savedStudent);
+      }, 900);
     } catch (err: any) {
       console.error('Assessment submission error:', err);
       setServerError(

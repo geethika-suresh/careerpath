@@ -17,7 +17,7 @@ import {
   computeDashboardMetrics
 } from './server/services/careerService.ts';
 import { generateAICareerInsights } from './server/services/geminiService.ts';
-import { SkillStatus } from './src/types.ts';
+import { SkillStatus, StudentProfile } from './src/types.ts';
 
 dotenv.config();
 
@@ -43,6 +43,19 @@ async function startServer() {
     res.json(getDatabaseStatus());
   });
 
+  // Helper to reliably extract student token or ID from headers, params, query or body
+  function resolveTokenOrId(req: express.Request, fallbackParam = 'id'): string {
+    const authHeader = req.headers.authorization;
+    const bearerToken = authHeader && authHeader.toLowerCase().startsWith('bearer ')
+      ? authHeader.slice(7).trim()
+      : null;
+    const xToken = (req.headers['x-access-token'] as string)?.trim();
+    const bodyToken = (req.body?.token as string)?.trim();
+    const queryToken = (req.query?.token as string)?.trim();
+    const param = (req.params?.[fallbackParam] as string)?.trim();
+    return param || bearerToken || xToken || bodyToken || queryToken || '';
+  }
+
   // ==========================================
   // CAREERS API
   // ==========================================
@@ -67,7 +80,8 @@ async function startServer() {
   // ==========================================
   app.post('/api/students', async (req, res) => {
     try {
-      const { name, degree, branch, year, currentSkills, interests, preferredDomain } = req.body;
+      const { name, degree, branch, year, currentSkills, interests, preferredDomain, selectedCareer, token } = req.body;
+      const passedToken = token || resolveTokenOrId(req);
 
       if (!name || !name.trim()) {
         return res.status(400).json({ success: false, error: 'Student name is required' });
@@ -87,7 +101,7 @@ async function startServer() {
 
       // Calculate initial recommendations to pick best default career
       const recommendations = calculateCareerMatches(skillsArray, interestsArray);
-      const topCareer = recommendations[0]?.career.id || 'frontend-developer';
+      const topCareer = selectedCareer || recommendations[0]?.career.id || 'frontend-developer';
 
       // Build initial personalized roadmap
       const roadmapProgress = buildPersonalizedRoadmap(topCareer, skillsArray);
@@ -98,30 +112,62 @@ async function startServer() {
         skillStatuses[sk] = 'completed';
       });
 
-      const newStudent = await createStudent({
-        name: name.trim(),
-        degree: degree.trim(),
-        branch: branch.trim(),
-        year: year.trim(),
-        currentSkills: skillsArray,
-        interests: interestsArray,
-        preferredDomain: preferredDomain?.trim() || '',
-        selectedCareer: topCareer,
-        completedSkills: skillsArray,
-        skillStatuses,
-        roadmapProgress,
-        readinessScore: 0
-      });
+      let savedStudent: any = null;
+
+      // Check if student with this token or id already exists
+      if (passedToken) {
+        const existing = await getStudentById(passedToken);
+        if (existing) {
+          savedStudent = await updateStudent(existing._id || existing.id || passedToken, {
+            name: name.trim(),
+            degree: degree.trim(),
+            branch: branch.trim(),
+            year: year.trim(),
+            currentSkills: skillsArray,
+            interests: interestsArray,
+            preferredDomain: preferredDomain?.trim() || '',
+            selectedCareer: topCareer,
+            completedSkills: skillsArray,
+            skillStatuses,
+            roadmapProgress
+          });
+        }
+      }
+
+      if (!savedStudent) {
+        savedStudent = await createStudent({
+          token: passedToken || undefined,
+          name: name.trim(),
+          degree: degree.trim(),
+          branch: branch.trim(),
+          year: year.trim(),
+          currentSkills: skillsArray,
+          interests: interestsArray,
+          preferredDomain: preferredDomain?.trim() || '',
+          selectedCareer: topCareer,
+          completedSkills: skillsArray,
+          skillStatuses,
+          roadmapProgress,
+          readinessScore: 0
+        });
+      }
 
       // Calculate readiness score
-      const dashboard = computeDashboardMetrics(newStudent, topCareer);
-      newStudent.readinessScore = dashboard.overallJobReadiness;
-      await updateStudent(newStudent._id || newStudent.id!, { readinessScore: dashboard.overallJobReadiness });
+      const dashboard = computeDashboardMetrics(savedStudent, topCareer);
+      savedStudent.readinessScore = dashboard.overallJobReadiness;
+      await updateStudent(savedStudent._id || savedStudent.id || savedStudent.token!, {
+        readinessScore: dashboard.overallJobReadiness
+      });
+
+      const responseToken = savedStudent.token || savedStudent._id || savedStudent.id;
 
       res.status(201).json({
         success: true,
-        student: newStudent,
+        token: responseToken,
+        student: savedStudent,
         recommendations,
+        roadmap: roadmapProgress,
+        metrics: dashboard,
         message: 'Student profile and career assessment saved successfully'
       });
     } catch (error: any) {
@@ -135,11 +181,12 @@ async function startServer() {
 
   app.get('/api/students/:id', async (req, res) => {
     try {
-      const student = await getStudentById(req.params.id);
+      const idOrToken = resolveTokenOrId(req, 'id');
+      const student = await getStudentById(idOrToken);
       if (!student) {
         return res.status(404).json({ success: false, error: 'Student not found' });
       }
-      res.json({ success: true, student });
+      res.json({ success: true, token: student.token || student._id, student });
     } catch (error: any) {
       console.error('Error fetching student:', error);
       res.status(500).json({ success: false, error: 'Failed to retrieve student profile' });
@@ -149,7 +196,7 @@ async function startServer() {
   app.put('/api/students/:id', async (req, res) => {
     try {
       const { selectedCareer, currentSkills, interests, completedSkills } = req.body;
-      const studentId = req.params.id;
+      const studentId = resolveTokenOrId(req, 'id');
 
       const existing = await getStudentById(studentId);
       if (!existing) {
@@ -162,16 +209,17 @@ async function startServer() {
       if (interests) updates.interests = interests;
       if (completedSkills) updates.completedSkills = completedSkills;
 
-      // If career changed, rebuild personalized roadmap
+      // If career changed, rebuild personalized roadmap for new career
       if (selectedCareer && selectedCareer !== existing.selectedCareer) {
         updates.roadmapProgress = buildPersonalizedRoadmap(
           selectedCareer,
-          updates.currentSkills || existing.currentSkills || []
+          updates.currentSkills || existing.currentSkills || [],
+          existing.roadmapProgress || []
         );
       }
 
       const updated = await updateStudent(studentId, updates);
-      res.json({ success: true, student: updated });
+      res.json({ success: true, token: updated?.token || updated?._id, student: updated });
     } catch (error: any) {
       console.error('Error updating student:', error);
       res.status(500).json({ success: false, error: 'Failed to update student profile' });
@@ -226,25 +274,109 @@ async function startServer() {
   // ==========================================
   // ROADMAP API
   // ==========================================
-  app.get('/api/roadmap/:careerId', (req, res) => {
+  app.get('/api/roadmap/:careerId', async (req, res) => {
     const career = CAREERS_DATA.find((c) => c.id === req.params.careerId);
     if (!career) {
       return res.status(404).json({ success: false, error: 'Career not found' });
     }
+
+    const idOrToken = resolveTokenOrId(req, 'studentId');
+    let personalizedRoadmap = null;
+    let metrics = null;
+
+    if (idOrToken) {
+      const student = await getStudentById(idOrToken);
+      if (student) {
+        personalizedRoadmap = buildPersonalizedRoadmap(
+          career.id,
+          student.currentSkills || [],
+          student.roadmapProgress || []
+        );
+        metrics = computeDashboardMetrics(student, career.id);
+      }
+    }
+
     res.json({
       success: true,
       careerId: career.id,
       careerName: career.name,
       roadmap: career.roadmap,
-      recommendedProjects: career.recommendedProjects
+      personalizedRoadmap: personalizedRoadmap || buildPersonalizedRoadmap(career.id, []),
+      recommendedProjects: career.recommendedProjects,
+      metrics
     });
+  });
+
+  // Explicitly generate/refresh a personalized career roadmap
+  app.post('/api/roadmap/generate', async (req, res) => {
+    try {
+      const { careerId, studentId, currentSkills, token } = req.body;
+      const targetCareerId = careerId || 'frontend-developer';
+      const targetCareer = CAREERS_DATA.find((c) => c.id === targetCareerId) || CAREERS_DATA[0];
+
+      const idOrToken = studentId || token || resolveTokenOrId(req);
+      let student: StudentProfile | null = null;
+      let skillsToUse = Array.isArray(currentSkills) ? currentSkills : [];
+
+      if (idOrToken) {
+        student = await getStudentById(idOrToken);
+        if (student) {
+          skillsToUse = student.currentSkills || [];
+        }
+      }
+
+      const personalizedRoadmap = buildPersonalizedRoadmap(
+        targetCareerId,
+        skillsToUse,
+        student?.roadmapProgress || []
+      );
+
+      // If student profile exists, persist the new career roadmap & selection
+      if (student) {
+        const studentIdentifier = student._id || student.id || student.token || idOrToken;
+        student = await updateStudent(studentIdentifier, {
+          selectedCareer: targetCareerId,
+          roadmapProgress: personalizedRoadmap
+        });
+      }
+
+      const tempProfile: StudentProfile = student || {
+        name: 'Student',
+        degree: 'Engineering',
+        branch: 'CSE',
+        year: '3rd Year',
+        currentSkills: skillsToUse,
+        interests: [],
+        completedSkills: skillsToUse,
+        skillStatuses: {},
+        roadmapProgress: personalizedRoadmap,
+        readinessScore: 0,
+        selectedCareer: targetCareerId
+      };
+
+      const metrics = computeDashboardMetrics(tempProfile, targetCareerId);
+
+      res.json({
+        success: true,
+        careerId: targetCareer.id,
+        careerName: targetCareer.name,
+        roadmap: targetCareer.roadmap,
+        personalizedRoadmap,
+        recommendedProjects: targetCareer.recommendedProjects,
+        metrics,
+        student
+      });
+    } catch (error: any) {
+      console.error('Error generating roadmap:', error);
+      res.status(500).json({ success: false, error: 'Failed to generate career roadmap' });
+    }
   });
 
   // Update specific step status for a student
   app.put('/api/roadmap/:studentId', async (req, res) => {
     try {
-      const studentId = req.params.studentId;
-      const { stepNumber, skill, status, notes } = req.body;
+      const studentId = resolveTokenOrId(req, 'studentId');
+      const { stepNumber, skill, status, notes, careerId } = req.body;
 
       if (stepNumber === undefined || !status) {
         return res.status(400).json({ success: false, error: 'stepNumber and status are required' });
@@ -255,26 +387,36 @@ async function startServer() {
         return res.status(404).json({ success: false, error: 'Student not found' });
       }
 
-      const targetCareerId = student.selectedCareer || 'frontend-developer';
-      let roadmapProgress = student.roadmapProgress || [];
+      const targetCareerId = careerId || student.selectedCareer || 'frontend-developer';
+      let roadmapProgress = [...(student.roadmapProgress || [])];
 
       if (roadmapProgress.length === 0) {
         roadmapProgress = buildPersonalizedRoadmap(targetCareerId, student.currentSkills || []);
       }
 
-      // Update the step
-      const stepIndex = roadmapProgress.findIndex((item) => item.stepNumber === Number(stepNumber));
+      // Update the step matching either stepNumber + careerId OR skill name
+      const stepNum = Number(stepNumber);
+      const stepIndex = roadmapProgress.findIndex(
+        (item) =>
+          item.stepNumber === stepNum ||
+          (skill && item.skill.toLowerCase().trim() === skill.toLowerCase().trim())
+      );
+
       if (stepIndex >= 0) {
         roadmapProgress[stepIndex] = {
           ...roadmapProgress[stepIndex],
+          stepNumber: stepNum,
+          skill: skill || roadmapProgress[stepIndex].skill,
+          careerId: targetCareerId,
           status,
           notes: notes !== undefined ? notes : roadmapProgress[stepIndex].notes,
           updatedAt: new Date().toISOString()
         };
       } else {
         roadmapProgress.push({
-          stepNumber: Number(stepNumber),
+          stepNumber: stepNum,
           skill: skill || `Step ${stepNumber}`,
+          careerId: targetCareerId,
           status,
           notes,
           updatedAt: new Date().toISOString()
@@ -298,6 +440,7 @@ async function startServer() {
       }
 
       const updatedStudentData: Partial<typeof student> = {
+        selectedCareer: targetCareerId,
         roadmapProgress,
         skillStatuses,
         completedSkills: Array.from(completedSkillsSet)
@@ -327,7 +470,8 @@ async function startServer() {
   // ==========================================
   app.get('/api/progress/:studentId', async (req, res) => {
     try {
-      const student = await getStudentById(req.params.studentId);
+      const studentId = resolveTokenOrId(req, 'studentId');
+      const student = await getStudentById(studentId);
       if (!student) {
         return res.status(404).json({ success: false, error: 'Student not found' });
       }
